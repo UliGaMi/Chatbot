@@ -1,0 +1,6 @@
+{
+  "appTitle": "chat_bot",
+  "@appTitle": {
+    "description": "El título de la aplicación"
+  }
+}
