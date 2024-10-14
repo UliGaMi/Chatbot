@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
 import 'chatbot/chat_message.dart';
 import 'chatbot/chat_input.dart';
 import 'settings/settings_controller.dart';
-import 'about/about_page.dart'; // Nueva vista para la información personal
+import 'about/about_page.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';  // Verificación de conexión
-import 'dart:async';  // Para usar StreamSubscription
+import 'package:connectivity_plus/connectivity_plus.dart';
+import '../services/database_helper.dart';
 
 class MyApp extends StatefulWidget {
   const MyApp({super.key, required this.settingsController});
@@ -21,34 +21,43 @@ class MyApp extends StatefulWidget {
 class _MyAppState extends State<MyApp> {
   final TextEditingController _controller = TextEditingController();
   final List<ChatMessage> _messages = [];
-  final List<Map<String, String>> _chatHistory = [];
-  final int _messageHistoryLimit = 10;
-  bool _isOnline = true;  // Estado de la conexión a internet
-  int _selectedIndex = 0;  // Para el navbar
-  late StreamSubscription<ConnectivityResult> _connectivitySubscription;
+  List<Map<String, String>> _chatHistory = [];
+  bool _isOnline = true;
+  bool _isLoading = false;
+  int _selectedIndex = 0;
+  final DatabaseHelper _dbHelper = DatabaseHelper();
 
   @override
   void initState() {
     super.initState();
     _checkConnectivity();
-    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((ConnectivityResult result) {
+    Connectivity().onConnectivityChanged.listen((ConnectivityResult result) {
       setState(() {
         _isOnline = result != ConnectivityResult.none;
       });
     });
-    _chatHistory.add({
-      'role': 'system',
-      'content': 'Eres un asistente útil que responde en español de manera breve y asertiva.'
+
+    _loadChatHistory();
+  }
+
+  Future<void> _loadChatHistory() async {
+    final history = await _dbHelper.getChatHistory();
+    setState(() {
+      _messages.clear();
+      _chatHistory.clear();
+      for (var row in history) {
+        _messages.add(ChatMessage(
+          text: row['message'],
+          isUser: row['is_user'] == 1,
+        ));
+        _chatHistory.add({
+          'role': row['is_user'] == 1 ? 'user' : 'assistant',
+          'content': row['message'],
+        });
+      }
     });
   }
 
-  @override
-  void dispose() {
-    _connectivitySubscription.cancel();  // Cancelar la suscripción cuando se destruya el widget
-    super.dispose();
-  }
-
-  // Verificar la conexión a internet inicialmente
   void _checkConnectivity() async {
     var connectivityResult = await (Connectivity().checkConnectivity());
     setState(() {
@@ -58,7 +67,6 @@ class _MyAppState extends State<MyApp> {
 
   Future<void> _sendMessage() async {
     if (!_isOnline) {
-      // Muestra un mensaje de error si no hay conexión
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No hay conexión a internet')),
       );
@@ -68,27 +76,30 @@ class _MyAppState extends State<MyApp> {
     final text = _controller.text;
     if (text.isEmpty) return;
 
-    // Agregar el mensaje del usuario a la interfaz de usuario
     setState(() {
       _messages.add(ChatMessage(text: text, isUser: true));
+      _isLoading = true;
     });
 
+    _dbHelper.insertMessage(text, true);
     _chatHistory.add({'role': 'user', 'content': text});
-
-    if (_chatHistory.length > _messageHistoryLimit * 2) {
-      _chatHistory.removeRange(0, _chatHistory.length - _messageHistoryLimit * 2);
-    }
 
     _controller.clear();
 
-    // Llama a la API de OpenAI para obtener la respuesta
     final response = await _getChatGPTResponse();
 
     setState(() {
       _messages.add(ChatMessage(text: response, isUser: false));
+      _isLoading = false;
     });
 
+    _dbHelper.insertMessage(response, false);
+
     _chatHistory.add({'role': 'assistant', 'content': response});
+
+    if (_chatHistory.length > 4) {
+      _chatHistory.removeRange(0, _chatHistory.length - 4);
+    }
   }
 
   Future<String> _getChatGPTResponse() async {
@@ -99,21 +110,21 @@ class _MyAppState extends State<MyApp> {
 
     final url = Uri.parse('https://api.openai.com/v1/chat/completions');
     final headers = {
-      'Content-Type': 'application/json; charset=utf-8', // Usamos UTF-8
+      'Content-Type': 'application/json; charset=UTF-8',
       'Authorization': 'Bearer $apiKey',
     };
 
     final body = jsonEncode({
       'model': 'gpt-3.5-turbo',
       'messages': _chatHistory,
-      'max_tokens': 50,  // Limitar la longitud de la respuesta
+      'max_tokens': 50,
       'temperature': 0.7,
     });
 
     try {
       final response = await http.post(url, headers: headers, body: body);
       if (response.statusCode == 200) {
-        final data = jsonDecode(utf8.decode(response.bodyBytes));  // Decodificación UTF-8
+        final data = jsonDecode(utf8.decode(response.bodyBytes));
         return data['choices'][0]['message']['content'].trim();
       } else {
         return 'Error: ${response.statusCode} - ${response.reasonPhrase}';
@@ -123,14 +134,12 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
-  // Cambiar entre las vistas
   void _onItemTapped(int index) {
     setState(() {
       _selectedIndex = index;
     });
   }
 
-  // Función para cambiar entre las páginas del chatbot y la de información
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -145,13 +154,15 @@ class _MyAppState extends State<MyApp> {
         body: IndexedStack(
           index: _selectedIndex,
           children: <Widget>[
-            ChatbotPage(  // Pasamos los estados actuales al ChatbotPage
+            ChatbotPage(
               controller: _controller,
               messages: _messages,
               onSendMessage: _sendMessage,
               isOnline: _isOnline,
+              isLoading: _isLoading,
+              onLoadComplete: () => setState(() {}),  // Refrescar el estado después de cargar el historial
             ),
-            const AboutPage(),  // Página 'Acerca de'
+            const AboutPage(),
           ],
         ),
         bottomNavigationBar: BottomNavigationBar(
@@ -166,27 +177,64 @@ class _MyAppState extends State<MyApp> {
             ),
           ],
           currentIndex: _selectedIndex,
-          onTap: _onItemTapped,  // Cambiar entre vistas
+          onTap: _onItemTapped,
         ),
       ),
     );
   }
 }
 
-// Página del Chatbot separada
-class ChatbotPage extends StatelessWidget {
+// Página del Chatbot separada con ScrollController
+class ChatbotPage extends StatefulWidget {
   final TextEditingController controller;
   final List<ChatMessage> messages;
   final VoidCallback onSendMessage;
   final bool isOnline;
+  final bool isLoading;
+  final VoidCallback onLoadComplete;  // Callback cuando el historial se cargue
 
   const ChatbotPage({
     required this.controller,
     required this.messages,
     required this.onSendMessage,
     required this.isOnline,
+    required this.isLoading,
+    required this.onLoadComplete,
     super.key,
   });
+
+  @override
+  _ChatbotPageState createState() => _ChatbotPageState();
+}
+
+class _ChatbotPageState extends State<ChatbotPage> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());  // Scroll inicial
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatbotPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.messages.length > oldWidget.messages.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -194,9 +242,10 @@ class ChatbotPage extends StatelessWidget {
       children: [
         Expanded(
           child: ListView.builder(
-            itemCount: messages.length,
+            controller: _scrollController,
+            itemCount: widget.messages.length,
             itemBuilder: (context, index) {
-              final message = messages[index];
+              final message = widget.messages[index];
               final messageBackground = message.isUser
                   ? Theme.of(context).brightness == Brightness.dark
                   ? Colors.blue[300]
@@ -221,15 +270,21 @@ class ChatbotPage extends StatelessWidget {
             },
           ),
         ),
+        if (widget.isLoading) const CircularProgressIndicator(),
         ChatInput(
-          controller: controller,
-          onSend: onSendMessage,
-          isOnline: isOnline,  // Pasamos el estado de conexión
+          controller: widget.controller,
+          onSend: widget.onSendMessage,
+          isOnline: widget.isOnline,
         ),
       ],
     );
   }
 }
+
+
+
+
+
 
 
 

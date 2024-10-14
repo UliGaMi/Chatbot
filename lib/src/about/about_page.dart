@@ -6,7 +6,7 @@ class AboutPage extends StatelessWidget {
 
   // Función para abrir el enlace
   Future<void> _launchURL() async {
-    final Uri url = Uri.parse('https://github.com/UliGaMi');
+    final Uri url = Uri.parse('https://github.com/UliGaMi/Chatbot.git');
     if (!await launchUrl(url)) {
       throw 'No se puede abrir $url';
     }
